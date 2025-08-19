@@ -1,201 +1,225 @@
 """
 This module provides functions to generate DDL (Data Definition Language) scripts
-for SQL Server database objects.
+for PostgreSQL database objects.
 """
 
 from sqlalchemy import text
 from typing import Dict, List, Optional
 from common.db_utils import get_db_connection
 
-def get_table_ddl(engine, table_name):
+def get_table_ddl(engine, table_name, schema_name='public'):
     """Get the DDL for a specific table"""
-    query = """
-    DECLARE @TableName NVARCHAR(128) = :table_name;
-    DECLARE @Result NVARCHAR(MAX) = '';
-    
-    -- Get column definitions
-    SELECT @Result = 'CREATE TABLE ' + QUOTENAME(OBJECT_SCHEMA_NAME(OBJECT_ID(@TableName))) + '.' + QUOTENAME(@TableName) + ' ('
-    
-    -- Add columns
-    SELECT @Result = @Result + CHAR(13) + CHAR(10) + 
-        '    ' + QUOTENAME(c.name) + ' ' + 
-        CASE WHEN t.name IN ('char', 'varchar', 'nchar', 'nvarchar') 
-            THEN t.name + '(' + 
-                CASE WHEN c.max_length = -1 
-                    THEN 'MAX'
-                    ELSE CAST(CASE WHEN t.name LIKE 'n%' 
-                        THEN c.max_length/2 
-                        ELSE c.max_length END AS VARCHAR(10))
-                END + ')'
-            WHEN t.name IN ('decimal', 'numeric')
-                THEN t.name + '(' + CAST(c.precision AS VARCHAR(10)) + ',' + CAST(c.scale AS VARCHAR(10)) + ')'
-            ELSE t.name
-        END + ' ' +
-        CASE WHEN c.is_nullable = 1 THEN 'NULL' ELSE 'NOT NULL' END + ','
-    FROM sys.columns c
-    JOIN sys.types t ON c.user_type_id = t.user_type_id
-    WHERE c.object_id = OBJECT_ID(@TableName)
-    ORDER BY c.column_id;
-    
-    -- Add primary key constraint if exists
-    SELECT @Result = @Result + CHAR(13) + CHAR(10) + 
-        '    CONSTRAINT ' + QUOTENAME(i.name) + ' PRIMARY KEY ' +
-        CASE WHEN i.type = 1 THEN 'CLUSTERED' ELSE 'NONCLUSTERED' END +
-        ' (' +
-        (SELECT STUFF((
-            SELECT ', ' + QUOTENAME(c.name) + 
-                   CASE WHEN ic.is_descending_key = 1 
-                        THEN ' DESC'
-                        ELSE ' ASC'
-                   END
-            FROM sys.index_columns ic
-            JOIN sys.columns c ON ic.object_id = c.object_id 
-                AND ic.column_id = c.column_id
-            WHERE ic.object_id = i.object_id 
-                AND ic.index_id = i.index_id
-            ORDER BY ic.key_ordinal
-            FOR XML PATH('')), 1, 2, '')) + '),'
-    FROM sys.indexes i
-    WHERE i.object_id = OBJECT_ID(@TableName)
-        AND i.is_primary_key = 1;
-    
-    -- Add unique constraints
-    SELECT @Result = @Result + CHAR(13) + CHAR(10) + 
-        '    CONSTRAINT ' + QUOTENAME(i.name) + ' UNIQUE ' +
-        CASE WHEN i.type = 1 THEN 'CLUSTERED' ELSE 'NONCLUSTERED' END +
-        ' (' +
-        (SELECT STUFF((
-            SELECT ', ' + QUOTENAME(c.name) + 
-                   CASE WHEN ic.is_descending_key = 1 
-                        THEN ' DESC'
-                        ELSE ' ASC'
-                   END
-            FROM sys.index_columns ic
-            JOIN sys.columns c ON ic.object_id = c.object_id 
-                AND ic.column_id = c.column_id
-            WHERE ic.object_id = i.object_id 
-                AND ic.index_id = i.index_id
-            ORDER BY ic.key_ordinal
-            FOR XML PATH('')), 1, 2, '')) + '),'
-    FROM sys.indexes i
-    WHERE i.object_id = OBJECT_ID(@TableName)
-        AND i.is_unique_constraint = 1;
-    
-    -- Remove the last comma and close the parentheses
-    SET @Result = LEFT(@Result, LEN(@Result) - 1) + CHAR(13) + CHAR(10) + ');'
-    
-    SELECT @Result;
-    """
     ddl_parts = []
     
-    # Get the table creation DDL
-    with engine.connect() as conn:
-        result = conn.execute(text(query), {"table_name": table_name}).fetchone()
-        if result and result[0]:
-            ddl_parts.append(result[0])
+    # Get column definitions
+    column_query = """
+    SELECT 
+        column_name,
+        data_type,
+        character_maximum_length,
+        numeric_precision,
+        numeric_scale,
+        is_nullable,
+        column_default
+    FROM information_schema.columns
+    WHERE table_name = %s 
+        AND table_schema = %s
+    ORDER BY ordinal_position
+    """
     
-    # Get and add column descriptions
-    descriptions = get_column_descriptions(engine, table_name)
-    if descriptions:
-        ddl_parts.append("\n-- Column Descriptions")
-        for column_name, description in descriptions:
-            # Escape single quotes in description
-            description = description.replace("'", "''")
-            ddl_parts.append(f"""EXEC sys.sp_addextendedproperty
-    @name = N'MS_Description',
-    @value = N'{description}',
-    @level0type = N'SCHEMA',
-    @level0name = N'dbo',
-    @level1type = N'TABLE',
-    @level1name = N'{table_name}',
-    @level2type = N'COLUMN',
-    @level2name = N'{column_name}';""")
+    with engine.connect() as conn:
+        columns = conn.execute(text(column_query), (table_name, schema_name)).fetchall()
+        
+        if not columns:
+            return ""
+        
+        # Build CREATE TABLE statement
+        ddl_parts.append(f'CREATE TABLE "{schema_name}"."{table_name}" (')
+        
+        column_definitions = []
+        for col in columns:
+            col_def = f'    "{col.column_name}" {format_column_type(col)}'
+            
+            if col.column_default is not None:
+                col_def += f' DEFAULT {col.column_default}'
+            
+            if col.is_nullable == 'NO':
+                col_def += ' NOT NULL'
+            
+            column_definitions.append(col_def)
+        
+        # Add primary key constraint
+        pk_columns = get_primary_key_columns(engine, table_name, schema_name)
+        if pk_columns:
+            pk_def = f'    CONSTRAINT "{table_name}_pkey" PRIMARY KEY ({", ".join([f\'"{col}"\' for col in pk_columns])})'
+            column_definitions.append(pk_def)
+        
+        ddl_parts.append(',\n'.join(column_definitions))
+        ddl_parts.append(');')
+    
+    # Get and add column comments
+    comments = get_column_comments(engine, table_name, schema_name)
+    if comments:
+        ddl_parts.append("\n-- Column Comments")
+        for column_name, comment in comments:
+            # Escape single quotes in comment
+            comment = comment.replace("'", "''")
+            ddl_parts.append(f"COMMENT ON COLUMN \"{schema_name}\".\"{table_name}\".\"{column_name}\" IS '{comment}';")
     
     return "\n".join(ddl_parts)
 
-def get_column_descriptions(engine, table_name):
-    """Get descriptions for all columns in a table"""
+def format_column_type(col):
+    """Format PostgreSQL column type with precision/scale/length"""
+    data_type = col.data_type.upper()
+    
+    if data_type in ('CHARACTER VARYING', 'VARCHAR'):
+        if col.character_maximum_length:
+            return f'VARCHAR({col.character_maximum_length})'
+        else:
+            return 'VARCHAR'
+    elif data_type in ('CHARACTER', 'CHAR'):
+        if col.character_maximum_length:
+            return f'CHAR({col.character_maximum_length})'
+        else:
+            return 'CHAR'
+    elif data_type == 'TEXT':
+        return 'TEXT'
+    elif data_type in ('NUMERIC', 'DECIMAL'):
+        if col.numeric_precision and col.numeric_scale is not None:
+            return f'NUMERIC({col.numeric_precision},{col.numeric_scale})'
+        elif col.numeric_precision:
+            return f'NUMERIC({col.numeric_precision})'
+        else:
+            return 'NUMERIC'
+    elif data_type == 'INTEGER':
+        return 'INTEGER'
+    elif data_type == 'BIGINT':
+        return 'BIGINT'
+    elif data_type == 'SMALLINT':
+        return 'SMALLINT'
+    elif data_type == 'BOOLEAN':
+        return 'BOOLEAN'
+    elif data_type == 'TIMESTAMP WITHOUT TIME ZONE':
+        return 'TIMESTAMP'
+    elif data_type == 'TIMESTAMP WITH TIME ZONE':
+        return 'TIMESTAMPTZ'
+    elif data_type == 'DATE':
+        return 'DATE'
+    elif data_type == 'TIME WITHOUT TIME ZONE':
+        return 'TIME'
+    elif data_type == 'DOUBLE PRECISION':
+        return 'DOUBLE PRECISION'
+    elif data_type == 'REAL':
+        return 'REAL'
+    else:
+        return data_type
+
+def get_column_comments(engine, table_name, schema_name='public'):
+    """Get comments for all columns in a table"""
     query = """
     SELECT 
-        c.name as column_name,
-        CAST(ep.value AS NVARCHAR(MAX)) as description
-    FROM sys.columns c
-    LEFT JOIN sys.extended_properties ep ON 
-        ep.major_id = c.object_id 
-        AND ep.minor_id = c.column_id 
-        AND ep.name = 'MS_Description'
-    WHERE c.object_id = OBJECT_ID(:table_name)
-        AND ep.value IS NOT NULL
-    ORDER BY c.column_id
+        cols.column_name,
+        col_description(pgc.oid, cols.ordinal_position) as comment
+    FROM information_schema.columns cols
+    JOIN pg_class pgc ON pgc.relname = cols.table_name
+    JOIN pg_namespace pgn ON pgn.oid = pgc.relnamespace
+    WHERE cols.table_name = %s 
+        AND cols.table_schema = %s
+        AND pgn.nspname = %s
+        AND col_description(pgc.oid, cols.ordinal_position) IS NOT NULL
+    ORDER BY cols.ordinal_position
     """
     with engine.connect() as conn:
-        result = conn.execute(text(query), {"table_name": table_name}).fetchall()
-        return [(row[0], row[1]) for row in result]
+        result = conn.execute(text(query), (table_name, schema_name, schema_name)).fetchall()
+        return [(row.column_name, row.comment) for row in result]
 
-def get_foreign_key_ddl(engine, table_name):
+def get_primary_key_columns(engine, table_name, schema_name='public'):
+    """Get primary key columns for a table"""
+    query = """
+    SELECT c.column_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.constraint_column_usage c 
+        ON c.constraint_name = tc.constraint_name
+        AND c.table_schema = tc.table_schema
+    WHERE tc.constraint_type = 'PRIMARY KEY'
+        AND tc.table_name = %s
+        AND tc.table_schema = %s
+    ORDER BY c.ordinal_position
+    """
+    with engine.connect() as conn:
+        result = conn.execute(text(query), (table_name, schema_name)).fetchall()
+        return [row.column_name for row in result]
+
+def get_foreign_key_ddl(engine, table_name, schema_name='public'):
     """Get the DDL for foreign keys of a specific table"""
     query = """
-    SELECT 
-        'ALTER TABLE ' + QUOTENAME(OBJECT_SCHEMA_NAME(parent_object_id)) + '.' + 
-        QUOTENAME(OBJECT_NAME(parent_object_id)) + 
-        ' ADD CONSTRAINT ' + QUOTENAME(name) + ' FOREIGN KEY (' + 
-        (SELECT STUFF((
-            SELECT ', ' + QUOTENAME(COL_NAME(fc.parent_object_id, fc.parent_column_id))
-            FROM sys.foreign_key_columns fc
-            WHERE fc.constraint_object_id = fk.object_id
-            ORDER BY fc.constraint_column_id
-            FOR XML PATH('')), 1, 2, '')) + 
-        ') REFERENCES ' + QUOTENAME(OBJECT_SCHEMA_NAME(referenced_object_id)) + '.' + 
-        QUOTENAME(OBJECT_NAME(referenced_object_id)) + ' (' + 
-        (SELECT STUFF((
-            SELECT ', ' + QUOTENAME(COL_NAME(fc.referenced_object_id, fc.referenced_column_id))
-            FROM sys.foreign_key_columns fc
-            WHERE fc.constraint_object_id = fk.object_id
-            ORDER BY fc.constraint_column_id
-            FOR XML PATH('')), 1, 2, '')) + 
-        ');'
-    FROM sys.foreign_keys fk
-    WHERE OBJECT_NAME(parent_object_id) = :table_name
+    SELECT
+        tc.constraint_name,
+        string_agg(kcu.column_name, ', ' ORDER BY kcu.ordinal_position) as columns,
+        ccu.table_schema as foreign_table_schema,
+        ccu.table_name as foreign_table_name,
+        string_agg(ccu.column_name, ', ' ORDER BY kcu.ordinal_position) as foreign_columns
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu 
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+    JOIN information_schema.constraint_column_usage ccu 
+        ON ccu.constraint_name = tc.constraint_name
+        AND ccu.table_schema = tc.table_schema
+    WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND tc.table_name = %s
+        AND tc.table_schema = %s
+    GROUP BY tc.constraint_name, ccu.table_schema, ccu.table_name
     """
+    
+    ddl_parts = []
     with engine.connect() as conn:
-        result = conn.execute(text(query), {"table_name": table_name}).fetchall()
-        return '\n'.join([row[0] for row in result]) if result else ""
+        result = conn.execute(text(query), (table_name, schema_name)).fetchall()
+        for row in result:
+            fk_ddl = (f'ALTER TABLE "{schema_name}"."{table_name}" '
+                     f'ADD CONSTRAINT "{row.constraint_name}" '
+                     f'FOREIGN KEY ({row.columns}) '
+                     f'REFERENCES "{row.foreign_table_schema}"."{row.foreign_table_name}" ({row.foreign_columns});')
+            ddl_parts.append(fk_ddl)
+    
+    return '\n'.join(ddl_parts)
 
-def get_index_ddl(engine, table_name):
+def get_index_ddl(engine, table_name, schema_name='public'):
     """Get the DDL for indexes of a specific table"""
     query = """
     SELECT
-        'CREATE ' + 
-        CASE WHEN i.is_unique = 1 THEN 'UNIQUE ' ELSE '' END +
-        'INDEX ' + QUOTENAME(i.name) + ' ON ' + 
-        QUOTENAME(OBJECT_SCHEMA_NAME(i.object_id)) + '.' + 
-        QUOTENAME(OBJECT_NAME(i.object_id)) + ' (' +
-        (SELECT STUFF((
-            SELECT ', ' + QUOTENAME(c.name) + 
-                   CASE WHEN ic.is_descending_key = 1 
-                        THEN ' DESC'
-                        ELSE ' ASC'
-                   END
-            FROM sys.index_columns ic
-            JOIN sys.columns c ON ic.object_id = c.object_id 
-                AND ic.column_id = c.column_id
-            WHERE ic.object_id = i.object_id 
-                AND ic.index_id = i.index_id
-            ORDER BY ic.key_ordinal
-            FOR XML PATH('')), 1, 2, '')) + ');'
-    FROM sys.indexes i
-    WHERE i.object_id = OBJECT_ID(:table_name)
-        AND i.type = 2  -- Non-clustered indexes only
-        AND i.is_primary_key = 0
-        AND i.is_unique_constraint = 0
+        i.relname as index_name,
+        ix.indisunique,
+        string_agg(a.attname, ', ' ORDER BY array_position(ix.indkey, a.attnum)) as columns
+    FROM pg_class t
+    JOIN pg_index ix ON t.oid = ix.indrelid
+    JOIN pg_class i ON i.oid = ix.indexrelid
+    JOIN pg_attribute a ON t.oid = a.attrelid
+    JOIN pg_namespace n ON t.relnamespace = n.oid
+    WHERE t.relname = %s
+        AND n.nspname = %s
+        AND a.attnum = ANY(ix.indkey)
+        AND ix.indisprimary = false
+    GROUP BY i.relname, ix.indisunique
     """
+    
+    ddl_parts = []
     with engine.connect() as conn:
-        result = conn.execute(text(query), {"table_name": table_name}).fetchall()
-        return '\n'.join([row[0] for row in result]) if result else ""
+        result = conn.execute(text(query), (table_name, schema_name)).fetchall()
+        for row in result:
+            unique_clause = 'UNIQUE ' if row.indisunique else ''
+            index_ddl = (f'CREATE {unique_clause}INDEX "{row.index_name}" '
+                        f'ON "{schema_name}"."{table_name}" ({row.columns});')
+            ddl_parts.append(index_ddl)
+    
+    return '\n'.join(ddl_parts)
 
-def get_database_ddl():
+def get_database_ddl(schema_name='public'):
     """
     Generate DDL for the entire database
+    
+    Args:
+        schema_name (str): Schema name to generate DDL for. Defaults to 'public'
     
     Returns:
         str: Complete DDL script for the database
@@ -205,44 +229,48 @@ def get_database_ddl():
 
     # Get all tables
     table_query = """
-    SELECT TABLE_NAME
-    FROM INFORMATION_SCHEMA.TABLES
-    WHERE TABLE_TYPE = 'BASE TABLE'
-    ORDER BY TABLE_NAME
+    SELECT table_name
+    FROM information_schema.tables
+    WHERE table_type = 'BASE TABLE'
+        AND table_schema = %s
+    ORDER BY table_name
     """
     
     with engine.connect() as conn:
-        tables = [row[0] for row in conn.execute(text(table_query)).fetchall()]
+        tables = [row.table_name for row in conn.execute(text(table_query), (schema_name,)).fetchall()]
     
     # Generate DDL for each table
     for table_name in tables:
         # Table definition
-        table_ddl = get_table_ddl(engine, table_name)
+        table_ddl = get_table_ddl(engine, table_name, schema_name)
         if table_ddl:
             ddl_parts.append(f"-- Table: {table_name}")
             ddl_parts.append(table_ddl)
-            ddl_parts.append("\nGO\n")
+            ddl_parts.append("")
         
         # Indexes
-        index_ddl = get_index_ddl(engine, table_name)
+        index_ddl = get_index_ddl(engine, table_name, schema_name)
         if index_ddl:
             ddl_parts.append(f"-- Indexes for: {table_name}")
             ddl_parts.append(index_ddl)
-            ddl_parts.append("\nGO\n")
+            ddl_parts.append("")
     
     # Add foreign keys at the end
     for table_name in tables:
-        fk_ddl = get_foreign_key_ddl(engine, table_name)
+        fk_ddl = get_foreign_key_ddl(engine, table_name, schema_name)
         if fk_ddl:
             ddl_parts.append(f"-- Foreign Keys for: {table_name}")
             ddl_parts.append(fk_ddl)
-            ddl_parts.append("\nGO\n")
+            ddl_parts.append("")
     
     return '\n'.join(ddl_parts)
 
-def get_database_schema() -> Dict:
+def get_database_schema(schema_name='public') -> Dict:
     """
     Get a structured representation of the database schema
+    
+    Args:
+        schema_name (str): Schema name to extract. Defaults to 'public'
     
     Returns:
         Dict: A dictionary containing the complete database schema structure:
@@ -283,20 +311,19 @@ def get_database_schema() -> Dict:
     
     # Get all tables
     table_query = """
-    SELECT 
-        SCHEMA_NAME(t.schema_id) as schema_name,
-        t.name as table_name,
-        t.object_id
-    FROM sys.tables t
-    ORDER BY schema_name, table_name
+    SELECT table_name
+    FROM information_schema.tables
+    WHERE table_type = 'BASE TABLE'
+        AND table_schema = %s
+    ORDER BY table_name
     """
     
     with engine.connect() as conn:
-        tables = conn.execute(text(table_query)).fetchall()
+        tables = conn.execute(text(table_query), (schema_name,)).fetchall()
         
         for table in tables:
             table_info = {
-                'schema': table.schema_name,
+                'schema': schema_name,
                 'name': table.table_name,
                 'columns': [],
                 'primary_key': None,
@@ -306,105 +333,79 @@ def get_database_schema() -> Dict:
             # Get columns
             column_query = """
             SELECT 
-                c.name as column_name,
-                t.name as data_type,
-                c.max_length,
-                c.precision,
-                c.scale,
-                c.is_nullable,
-                ep.value as description
-            FROM sys.columns c
-            JOIN sys.types t ON c.user_type_id = t.user_type_id
-            LEFT JOIN sys.extended_properties ep ON 
-                ep.major_id = c.object_id AND 
-                ep.minor_id = c.column_id AND 
-                ep.name = 'MS_Description'
-            WHERE c.object_id = :object_id
-            ORDER BY c.column_id
+                column_name,
+                data_type,
+                character_maximum_length,
+                numeric_precision,
+                numeric_scale,
+                is_nullable,
+                column_default,
+                col_description(pgc.oid, ordinal_position) as description
+            FROM information_schema.columns cols
+            LEFT JOIN pg_class pgc ON pgc.relname = cols.table_name
+            LEFT JOIN pg_namespace pgn ON pgn.oid = pgc.relnamespace AND pgn.nspname = cols.table_schema
+            WHERE table_name = %s 
+                AND table_schema = %s
+            ORDER BY ordinal_position
             """
             
-            columns = conn.execute(text(column_query), {'object_id': table.object_id}).fetchall()
+            columns = conn.execute(text(column_query), (table.table_name, schema_name)).fetchall()
             for col in columns:
-                # Format the data type with precision/scale/length if applicable
-                data_type = col.data_type
-                if col.data_type in ('char', 'varchar', 'nchar', 'nvarchar'):
-                    length = 'MAX' if col.max_length == -1 else str(col.max_length)
-                    if col.data_type.startswith('n'):
-                        length = str(int(length) // 2) if length != 'MAX' else 'MAX'
-                    data_type = f"{col.data_type}({length})"
-                elif col.data_type in ('decimal', 'numeric'):
-                    data_type = f"{col.data_type}({col.precision},{col.scale})"
-                
                 table_info['columns'].append({
                     'name': col.column_name,
-                    'data_type': data_type,
-                    'is_nullable': col.is_nullable,
+                    'data_type': format_column_type(col),
+                    'is_nullable': col.is_nullable == 'YES',
                     'description': col.description
                 })
             
             # Get primary key
-            pk_query = """
-            SELECT 
-                i.name as pk_name,
-                c.name as column_name,
-                ic.is_descending_key
-            FROM sys.indexes i
-            JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-            JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-            WHERE i.object_id = :object_id AND i.is_primary_key = 1
-            ORDER BY ic.key_ordinal
-            """
-            
-            pk_columns = conn.execute(text(pk_query), {'object_id': table.object_id}).fetchall()
+            pk_columns = get_primary_key_columns(engine, table.table_name, schema_name)
             if pk_columns:
                 table_info['primary_key'] = {
-                    'name': pk_columns[0].pk_name,
-                    'columns': [col.column_name for col in pk_columns]
+                    'name': f"{table.table_name}_pkey",
+                    'columns': pk_columns
                 }
             
             # Get foreign keys
             fk_query = """
-            SELECT 
-                fk.name as fk_name,
-                fk_col.name as fk_column_name,
-                SCHEMA_NAME(pk_tab.schema_id) as pk_schema_name,
-                pk_tab.name as pk_table_name,
-                pk_col.name as pk_column_name
-            FROM sys.foreign_keys fk
-            JOIN sys.foreign_key_columns fk_cols ON fk.object_id = fk_cols.constraint_object_id
-            JOIN sys.columns fk_col ON fk_cols.parent_object_id = fk_col.object_id 
-                AND fk_cols.parent_column_id = fk_col.column_id
-            JOIN sys.tables pk_tab ON fk.referenced_object_id = pk_tab.object_id
-            JOIN sys.columns pk_col ON fk_cols.referenced_object_id = pk_col.object_id 
-                AND fk_cols.referenced_column_id = pk_col.column_id
-            WHERE fk.parent_object_id = :object_id
-            ORDER BY fk.name, fk_cols.constraint_column_id
+            SELECT
+                tc.constraint_name,
+                string_agg(kcu.column_name, ',' ORDER BY kcu.ordinal_position) as columns,
+                ccu.table_schema as foreign_table_schema,
+                ccu.table_name as foreign_table_name,
+                string_agg(ccu.column_name, ',' ORDER BY kcu.ordinal_position) as foreign_columns
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu 
+                ON tc.constraint_name = kcu.constraint_name
+                AND tc.table_schema = kcu.table_schema
+            JOIN information_schema.constraint_column_usage ccu 
+                ON ccu.constraint_name = tc.constraint_name
+                AND ccu.table_schema = tc.table_schema
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+                AND tc.table_name = %s
+                AND tc.table_schema = %s
+            GROUP BY tc.constraint_name, ccu.table_schema, ccu.table_name
             """
             
-            fk_results = conn.execute(text(fk_query), {'object_id': table.object_id}).fetchall()
+            fk_results = conn.execute(text(fk_query), (table.table_name, schema_name)).fetchall()
             
-            # Group foreign key columns by constraint name
-            fk_dict = {}
             for fk in fk_results:
-                if fk.fk_name not in fk_dict:
-                    fk_dict[fk.fk_name] = {
-                        'name': fk.fk_name,
-                        'columns': [],
-                        'references': {
-                            'schema': fk.pk_schema_name,
-                            'table': fk.pk_table_name,
-                            'columns': []
-                        }
+                table_info['foreign_keys'].append({
+                    'name': fk.constraint_name,
+                    'columns': fk.columns.split(','),
+                    'references': {
+                        'schema': fk.foreign_table_schema,
+                        'table': fk.foreign_table_name,
+                        'columns': fk.foreign_columns.split(',')
                     }
-                fk_dict[fk.fk_name]['columns'].append(fk.fk_column_name)
-                fk_dict[fk.fk_name]['references']['columns'].append(fk.pk_column_name)
+                })
             
-            table_info['foreign_keys'] = list(fk_dict.values())
             schema['tables'].append(table_info)
     
     return schema
 
-if __name__ == "__main__":
+def main():
+    """Main function for CLI usage"""
     # Print both DDL and schema for testing
     print("=== DDL Output ===")
     ddl = get_database_ddl()
@@ -416,7 +417,8 @@ if __name__ == "__main__":
         print(f"\nTable: {table['schema']}.{table['name']}")
         print("Columns:")
         for col in table['columns']:
-            print(f"  - {col['name']} {col['data_type']} {'NULL' if col['is_nullable'] else 'NOT NULL'}")
+            nullable = 'NULL' if col['is_nullable'] else 'NOT NULL'
+            print(f"  - {col['name']} {col['data_type']} {nullable}")
             if col['description']:
                 print(f"    Description: {col['description']}")
         if table['primary_key']:
@@ -427,3 +429,6 @@ if __name__ == "__main__":
             for fk in table['foreign_keys']:
                 print(f"  {fk['name']}: ({', '.join(fk['columns'])}) -> "
                       f"{fk['references']['schema']}.{fk['references']['table']}({', '.join(fk['references']['columns'])})")
+
+if __name__ == "__main__":
+    main()

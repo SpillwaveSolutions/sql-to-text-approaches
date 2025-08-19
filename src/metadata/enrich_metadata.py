@@ -6,43 +6,47 @@ from metadata.get_database_ddl import get_database_ddl
 from openai import OpenAI
 from typing import Dict, List, Tuple
 
-def get_table_columns(engine, table_name: str) -> List[Tuple[str, str, bool]]:
+def get_table_columns(engine, table_name: str, schema_name: str = 'public') -> List[Tuple[str, str, bool]]:
     """Get columns and their data types for a table"""
     query = """
     SELECT 
-        c.name,
-        t.name as data_type,
-        c.is_nullable,
-        COALESCE(ep.value, '') as description
-    FROM sys.columns c
-    JOIN sys.types t ON c.user_type_id = t.user_type_id
-    LEFT JOIN sys.extended_properties ep ON 
-        ep.major_id = c.object_id 
-        AND ep.minor_id = c.column_id 
-        AND ep.name = 'MS_Description'
-    WHERE c.object_id = OBJECT_ID(:table_name)
-    ORDER BY c.column_id
+        cols.column_name,
+        cols.data_type,
+        cols.is_nullable = 'YES' as is_nullable,
+        COALESCE(col_description(pgc.oid, cols.ordinal_position), '') as description
+    FROM information_schema.columns cols
+    LEFT JOIN pg_class pgc ON pgc.relname = cols.table_name
+    LEFT JOIN pg_namespace pgn ON pgn.oid = pgc.relnamespace AND pgn.nspname = cols.table_schema
+    WHERE cols.table_name = %s 
+        AND cols.table_schema = %s
+    ORDER BY cols.ordinal_position
     """
     with engine.connect() as conn:
-        result = conn.execute(text(query), {"table_name": table_name}).fetchall()
+        result = conn.execute(text(query), (table_name, schema_name)).fetchall()
         return [(row[0], row[1], row[2], row[3]) for row in result]
 
-def get_foreign_key_info(engine, table_name: str) -> List[Dict]:
+def get_foreign_key_info(engine, table_name: str, schema_name: str = 'public') -> List[Dict]:
     """Get foreign key relationships for a table"""
     query = """
     SELECT 
-        fk.name as fk_name,
-        OBJECT_NAME(fk.parent_object_id) as parent_table,
-        COL_NAME(fkc.parent_object_id, fkc.parent_column_id) as parent_column,
-        OBJECT_NAME(fk.referenced_object_id) as referenced_table,
-        COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) as referenced_column
-    FROM sys.foreign_keys fk
-    JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
-    WHERE OBJECT_NAME(fk.parent_object_id) = :table_name
-        OR OBJECT_NAME(fk.referenced_object_id) = :table_name
+        tc.constraint_name as fk_name,
+        tc.table_name as parent_table,
+        kcu.column_name as parent_column,
+        ccu.table_name as referenced_table,
+        ccu.column_name as referenced_column
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu 
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+    JOIN information_schema.constraint_column_usage ccu 
+        ON ccu.constraint_name = tc.constraint_name
+        AND ccu.table_schema = tc.table_schema
+    WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND (tc.table_name = %s OR ccu.table_name = %s)
+        AND tc.table_schema = %s
     """
     with engine.connect() as conn:
-        result = conn.execute(text(query), {"table_name": table_name}).fetchall()
+        result = conn.execute(text(query), (table_name, table_name, schema_name)).fetchall()
         return [
             {
                 "fk_name": row[0],
@@ -109,53 +113,17 @@ Format the response as a concise paragraph suitable for a SQL column description
         print(f"Error generating description for {table_name}.{column_name}: {str(e)}")
         return existing_description if existing_description else ""
 
-def update_column_description(engine, table_name: str, column_name: str, description: str):
-    """Update or add extended property for column description"""
-    query = """
-    IF EXISTS (
-        SELECT 1 FROM sys.extended_properties 
-        WHERE major_id = OBJECT_ID(:table_name)
-        AND minor_id = (
-            SELECT column_id 
-            FROM sys.columns 
-            WHERE object_id = OBJECT_ID(:table_name) 
-            AND name = :column_name
-        )
-        AND name = 'MS_Description'
-    )
-    BEGIN
-        EXEC sys.sp_updateextendedproperty 
-            @name = N'MS_Description',
-            @value = :description,
-            @level0type = N'SCHEMA',
-            @level0name = N'dbo',
-            @level1type = N'TABLE',
-            @level1name = :table_name,
-            @level2type = N'COLUMN',
-            @level2name = :column_name
-    END
-    ELSE
-    BEGIN
-        EXEC sys.sp_addextendedproperty 
-            @name = N'MS_Description',
-            @value = :description,
-            @level0type = N'SCHEMA',
-            @level0name = N'dbo',
-            @level1type = N'TABLE',
-            @level1name = :table_name,
-            @level2type = N'COLUMN',
-            @level2name = :column_name
-    END
-    """
+def update_column_description(engine, table_name: str, column_name: str, description: str, schema_name: str = 'public'):
+    """Update or add column comment"""
+    # Escape single quotes in description
+    escaped_description = description.replace("'", "''")
+    query = f'COMMENT ON COLUMN "{schema_name}"."{table_name}"."{column_name}" IS %s'
+    
     with engine.connect() as conn:
-        conn.execute(text(query), {
-            "table_name": table_name,
-            "column_name": column_name,
-            "description": description
-        })
+        conn.execute(text(query), (escaped_description,))
         conn.commit()
 
-def enrich_metadata():
+def enrich_metadata(schema_name: str = 'public'):
     """Main function to enrich database metadata with column descriptions"""
     # Ensure OpenAI API key is set
     if not os.getenv("OPENAI_API_KEY"):
@@ -165,24 +133,25 @@ def enrich_metadata():
     
     # Get all tables
     table_query = """
-    SELECT TABLE_NAME
-    FROM INFORMATION_SCHEMA.TABLES
-    WHERE TABLE_TYPE = 'BASE TABLE'
-    ORDER BY TABLE_NAME
+    SELECT table_name
+    FROM information_schema.tables
+    WHERE table_type = 'BASE TABLE'
+        AND table_schema = %s
+    ORDER BY table_name
     """
     
     with engine.connect() as conn:
-        tables = [row[0] for row in conn.execute(text(table_query)).fetchall()]
+        tables = [row[0] for row in conn.execute(text(table_query), (schema_name,)).fetchall()]
     
     # Process each table
     for table_name in tables:
         print(f"\nProcessing table: {table_name}")
         
         # Get foreign key information for context
-        fk_info = get_foreign_key_info(engine, table_name)
+        fk_info = get_foreign_key_info(engine, table_name, schema_name)
         
         # Get columns and their current metadata
-        columns = get_table_columns(engine, table_name)
+        columns = get_table_columns(engine, table_name, schema_name)
         
         # Process each column
         for column_name, data_type, is_nullable, existing_description in columns:
@@ -200,8 +169,12 @@ def enrich_metadata():
             
             # Update the column description in the database
             if description:
-                update_column_description(engine, table_name, column_name, description)
+                update_column_description(engine, table_name, column_name, description, schema_name)
                 print(f"    Updated description for {column_name}")
 
-if __name__ == "__main__":
+def main():
+    """Main function for CLI usage"""
     enrich_metadata()
+
+if __name__ == "__main__":
+    main()

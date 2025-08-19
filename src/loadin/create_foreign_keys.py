@@ -7,9 +7,10 @@ from common.db_utils import get_db_connection
 def get_table_columns_with_types(engine, table_name):
     """Get all columns and their data types for a given table"""
     query = f"""
-    SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_NAME = '{table_name}'
+    SELECT column_name, data_type, character_maximum_length
+    FROM information_schema.columns
+    WHERE table_name = '{table_name}'
+    AND table_schema = 'public'
     """
     with engine.connect() as conn:
         result = conn.execute(text(query))
@@ -19,7 +20,7 @@ def ensure_valid_key_type(engine, table_name, column_name):
     """Convert column to a valid type for keys if needed"""
     alter_query = f"""
     ALTER TABLE {table_name}
-    ALTER COLUMN {column_name} NVARCHAR(255) NOT NULL;
+    ALTER COLUMN {column_name} TYPE VARCHAR(255);
     """
     try:
         with engine.connect() as conn:
@@ -47,12 +48,13 @@ def check_uniqueness(engine, table_name, column_name):
 def get_primary_key_columns(engine, table_name):
     """Get existing primary key columns for a table"""
     query = f"""
-    SELECT c.name as column_name
-    FROM sys.indexes i
-    JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-    JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-    WHERE i.is_primary_key = 1
-    AND OBJECT_NAME(i.object_id) = '{table_name}'
+    SELECT c.column_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.constraint_column_usage c 
+        ON c.constraint_name = tc.constraint_name
+    WHERE tc.constraint_type = 'PRIMARY KEY'
+    AND tc.table_name = '{table_name}'
+    AND tc.table_schema = 'public'
     """
     try:
         with engine.connect() as conn:
@@ -151,18 +153,22 @@ def create_foreign_keys(engine, relationships):
                 continue
             
             # Create foreign key if it doesn't exist
+            constraint_name = f"FK_{child_table}_{parent_table}_{column_name}"
             create_fk_query = f"""
-            IF NOT EXISTS (
-                SELECT 1 FROM sys.foreign_keys
-                WHERE parent_object_id = OBJECT_ID('{child_table}')
-                AND referenced_object_id = OBJECT_ID('{parent_table}')
-            )
+            DO $$ 
             BEGIN
-                ALTER TABLE {child_table}
-                ADD CONSTRAINT FK_{child_table}_{parent_table}_{column_name}
-                FOREIGN KEY ({column_name})
-                REFERENCES {parent_table}({column_name});
-            END
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints 
+                    WHERE constraint_name = '{constraint_name}'
+                    AND table_name = '{child_table}'
+                    AND table_schema = 'public'
+                ) THEN
+                    ALTER TABLE {child_table}
+                    ADD CONSTRAINT {constraint_name}
+                    FOREIGN KEY ({column_name})
+                    REFERENCES {parent_table}({column_name});
+                END IF;
+            END $$;
             """
             
             with engine.connect() as conn:
@@ -180,9 +186,10 @@ def main():
     # Get all tables in the database
     with engine.connect() as conn:
         result = conn.execute(text("""
-            SELECT TABLE_NAME 
-            FROM INFORMATION_SCHEMA.TABLES 
-            WHERE TABLE_TYPE = 'BASE TABLE'
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_type = 'BASE TABLE'
+            AND table_schema = 'public'
         """))
         tables = [row[0] for row in result]
     
