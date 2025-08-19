@@ -1,0 +1,118 @@
+[tool.poetry]
+name = "text-to-sql-approaches"
+version = "0.1.0"
+description = "Research project implementing multiple natural language interfaces for analyzing retail transaction data"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+# Azure Core
+azure-core = "^1.29.5"
+azure-identity = "^1.15.0"
+
+# Azure AI Services
+azure-ai-ml = "^1.12.1"
+azure-cognitiveservices-language-textanalytics = "^0.2.0"
+azure-search-documents = "^11.4.0"
+
+# Azure CosmosDB
+azure-cosmos = "^4.5.1"
+
+# Utility packages
+python-dotenv = "^1.0.0"
+requests = "^2.31.0"
+
+# PostgreSQL dependencies
+psycopg2-binary = "^2.9.7"
+sqlalchemy = "^2.0.23"
+
+# SQLite dependencies
+sqlalchemy-utils = "^0.41.1"
+
+# Data processing
+pandas = "^2.1.3"
+numpy = "^1.26.2"
+
+# Data generation
+faker = "^20.1.0"
+tqdm = "^4.66.1"
+
+# Core dependencies for all applications
+openai = "^1.3.0"
+
+[tool.poetry.extras]
+plain-llm = ["streamlit", "plotly"]
+graph = ["neo4j", "cogdb", "streamlit", "plotly"]
+rag = ["pgvector", "sentence-transformers", "scikit-learn", "streamlit", "plotly"]
+all = ["streamlit", "plotly", "neo4j", "cogdb", "pgvector", "sentence-transformers", "scikit-learn"]
+
+[tool.poetry.group.chat.dependencies]
+# Chat application dependencies
+streamlit = "^1.28.0"
+plotly = "^5.24.1"
+
+[tool.poetry.group.graph.dependencies]  
+# Graph-specific dependencies
+neo4j = "^5.14.0"
+cogdb = "^3.0.7"
+
+[tool.poetry.group.rag.dependencies]
+# RAG-specific dependencies for pgvector
+pgvector = "^0.2.4"
+sentence-transformers = "^2.2.2"
+scikit-learn = "^1.3.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+black = "^23.0.0"
+isort = "^5.12.0"
+flake8 = "^6.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+# Data pipeline scripts
+import-data = "src.loadin.sqlite_to_postgres:main"
+create-fks = "src.loadin.create_foreign_keys:main"
+enrich-metadata = "src.metadata.enrich_metadata:main"
+get-ddl = "src.metadata.get_database_ddl:main"
+
+# Note: Chat applications should be run with:
+# poetry run streamlit run src/app/chat/plain_llm/prompt_chain_app.py
+# poetry run streamlit run src/app/chat/graph/graph_chat_app.py
+
+[tool.black]
+line-length = 100
+target-version = ['py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.venv
+  | venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
