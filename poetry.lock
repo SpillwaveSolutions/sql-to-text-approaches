@@ -3683,6 +3683,21 @@ timezone = ["python-dateutil"]
 url = ["furl (>=0.4.1)"]
 
 [[package]]
+name = "sqlvalidator"
+version = "0.0.20"
+description = "SQL queries formatting, syntactic and semantic validation"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "sqlvalidator-0.0.20-py3-none-any.whl", hash = "sha256:8820752d9ec5ccb9cc977099edf991f0090acf4f1e4beb0f2fb35a6e1cc03c89"},
+    {file = "sqlvalidator-0.0.20.tar.gz", hash = "sha256:6f399be1bf0ba54a17ad16f6818836c169d17c16306f4cfa6fc883f13b1705fc"},
+]
+
+[package.extras]
+test = ["pytest (==7.2.0)"]
+
+[[package]]
 name = "streamlit"
 version = "1.48.1"
 description = "A faster way to build and share data apps"
@@ -4361,4 +4376,4 @@ rag = []
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "eaf60a0ad4a14d24d6d8dfe849c5e254223265d4a83d246c08b1b6b6d090b048"
+content-hash = "374b58a2675cd458269c35e8bcd8dc9d32c7aa9b2d9ef12a3a378262da0c827a"

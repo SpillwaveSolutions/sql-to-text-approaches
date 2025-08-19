@@ -27,6 +27,8 @@ import json
 from sqlalchemy import text
 import openai
 from typing import Tuple, Dict
+import re
+from src.common.sql_validator import validate_sql, get_validation_error_context
 
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -34,14 +36,86 @@ class DecimalEncoder(json.JSONEncoder):
             return float(obj)
         return super(DecimalEncoder, self).default(obj)
 
+def parse_json_response(raw_content: str) -> Dict:
+    """Parse JSON response with robust error handling and fallback strategies."""
+    if not raw_content:
+        raise ValueError("Empty response content")
+    
+    # Strategy 1: Direct JSON parsing
+    try:
+        return json.loads(raw_content)
+    except json.JSONDecodeError:
+        pass
+    
+    # Strategy 2: Clean and try again
+    try:
+        cleaned = re.sub(r'```json\s*', '', raw_content)
+        cleaned = re.sub(r'```\s*$', '', cleaned)
+        cleaned = cleaned.strip()
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    
+    # Strategy 3: Extract JSON from mixed content
+    try:
+        json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+    except json.JSONDecodeError:
+        pass
+    
+    # Final fallback: create a structured response
+    logger.warning(f"All JSON parsing strategies failed. Raw content: {raw_content[:200]}...")
+    return {"error": "Failed to parse JSON response", "raw_content": raw_content}
+
 # Neo4j connection parameters
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "password"
+NEO4J_PASSWORD = "newpassword123"
 
 def get_neo4j_driver():
     """Get a Neo4j driver instance"""
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+def check_and_initialize_graph():
+    """Check if the graph database has data, and populate it if empty"""
+    try:
+        with get_neo4j_driver().session() as session:
+            # Check if there are any nodes in the database
+            result = session.run("MATCH (n) RETURN count(n) as node_count")
+            node_count = result.single()["node_count"]
+            
+            if node_count == 0:
+                logger.info("Graph database is empty. Initializing schema graph...")
+                
+                # Show progress to user
+                with st.spinner("🔄 Building schema graph from database metadata... This may take a moment."):
+                    # Import and run the schema builder
+                    from src.app.chat.graph.schema_to_graph import SchemaGraphBuilder
+                    import os
+                    
+                    # Get OpenAI API key for semantic enrichment
+                    openai_api_key = os.environ.get("OPENAI_API_KEY")
+                    
+                    # Build the schema graph
+                    builder = SchemaGraphBuilder(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, openai_api_key)
+                    try:
+                        builder.build_schema_graph()
+                        logger.info("Schema graph built successfully")
+                    finally:
+                        builder.close()
+                
+                st.success("✅ Schema graph built successfully!")
+                
+                # Rerun to refresh with the new data
+                st.rerun()
+            else:
+                logger.info(f"Graph database already contains {node_count} nodes")
+                
+    except Exception as e:
+        logger.error(f"Error checking/initializing graph database: {str(e)}")
+        st.warning(f"⚠️ Could not initialize graph database: {str(e)}")
+        raise
 
 
 def get_graph_summary() -> str:
@@ -94,7 +168,7 @@ def get_graph_summary() -> str:
         
         try:
             response = openai.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4.1",
                 messages=messages,
                 temperature=0.7,
                 max_tokens=300
@@ -130,13 +204,14 @@ def generate_sql_query(question: str, ddl: str, error_context: str = None) -> Di
 
     Guidelines for query generation:
     1. Focus on the tables and columns identified in the graph context
-    2. Generate a precise SQL query in SQL Server dialect that answers the question
+    2. Generate a precise PostgreSQL query that answers the question
     3. Use appropriate JOINs and WHERE clauses
     4. Keep the query efficient and focused
-    5. When asked to return a list of things, reasonably limit the number of results to 10 unless the user has indicated otherwise. Never use "LIMIT", always use "TOP"
+    5. When asked to return a list of things, reasonably limit the number of results to 10 unless the user has indicated otherwise. Use "LIMIT" for result limiting (PostgreSQL syntax)
     6. When asked to return a count, return the count
     7. When asked to return a single value, return the value
-    8. When a table references another table that will add meaningful additional information, perform the join"""
+    8. When a table references another table that will add meaningful additional information, perform the join
+    9. Ensure the SQL syntax is consistent with PostgreSQL dialect"""
 
     if error_context:
         system_prompt += f"\n\nPrevious attempt failed with error: {error_context}\nPlease fix the query accordingly."
@@ -150,14 +225,14 @@ Question: {question}"""}
     
     try:
         response = openai.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4.1",
             messages=messages,
             temperature=0.1,
             max_tokens=500,
             response_format={ "type": "json_object" }
         )
         
-        result = json.loads(response.choices[0].message.content)
+        result = parse_json_response(response.choices[0].message.content)
         result["graph_context"] = graph_context
         return result
         
@@ -215,14 +290,14 @@ def generate_cypher_query(question: str) -> Dict:
     
     try:
         response = openai.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4.1",
             messages=messages,
             temperature=0.1,
             max_tokens=500,
             response_format={ "type": "json_object" }
         )
         
-        result = json.loads(response.choices[0].message.content)
+        result = parse_json_response(response.choices[0].message.content)
         
         # Execute the Cypher query to get relevant context
         with get_neo4j_driver().session() as session:
@@ -265,40 +340,28 @@ def attempt_query_generation_and_validation(question: str, ddl: str, validation_
     return query_response, False, "Maximum validation attempts reached"
 
 def validate_query(question: str, query_response: Dict, ddl: str) -> Tuple[bool, str]:
-    logger.info("Validating generated query")
-    system_prompt = """You are a SQL query validator. Given a user question, generated SQL query with metadata, and database DDL:
-    1. Check if the query will answer the user's question correctly
-    2. Verify table relationships and joins are correct
-    3. Ensure all necessary conditions are included
-    4. Verify the expected result type matches the question intent
-    5. Ensure the query reasonably limits the results for lists to less than 20
-    
-    Return your response in the following JSON structure:
-    {
-        "is_valid": true/false,
-        "explanation": "detailed explanation of validation result",
-        "suggested_improvements": ["list", "of", "improvements"] # only if not valid
-    }"""
-    
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Question: {question}\nQuery Response: {json.dumps(query_response)}\nDDL: {ddl}"}
-    ]
+    logger.info("Validating generated query using SQL validator")
     
     try:
-        response = openai.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            temperature=0.1,
-            max_tokens=300,
-            response_format={ "type": "json_object" }
-        )
-        validation_result = json.loads(response.choices[0].message.content)
-        logger.info(f"Query validation result: valid={validation_result['is_valid']}, message={validation_result['explanation']}")
-        return validation_result["is_valid"], validation_result["explanation"]
+        sql_query = query_response.get("sql", "")
+        if not sql_query:
+            return False, "No SQL query provided in response"
+        
+        # Use the SQL validator for syntax and schema validation
+        validation_result = validate_sql(sql_query, skip_syntax=False)
+        
+        if validation_result["is_valid"]:
+            logger.info("Query validation successful using SQL validator")
+            return True, validation_result.get("message", "SQL query validation passed")
+        else:
+            error_context = get_validation_error_context(validation_result)
+            logger.warning(f"Query validation failed: {error_context}")
+            return False, error_context
+            
     except Exception as e:
-        logger.error(f"Error during query validation: {str(e)}")
-        raise
+        error_msg = f"Error during query validation: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
 
 def attempt_query_execution(query: str, max_retries: int = 2) -> Tuple[pd.DataFrame, bool, str]:
     """Attempt to execute a query with retries."""
@@ -385,7 +448,7 @@ def generate_data_interpretation(question: str, query_response: Dict, results_df
     
     try:
         response = openai.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4.1",
             messages=messages,
             temperature=0.7,
             max_tokens=150
@@ -450,6 +513,10 @@ if 'messages' not in st.session_state:
 
 if 'db_summary' not in st.session_state:
     try:
+        # First, check and initialize the graph database if needed
+        check_and_initialize_graph()
+        
+        # Then get the graph summary
         st.session_state.db_summary = get_graph_summary()
     except Exception as e:
         st.error(f"Error getting database summary: {str(e)}")
@@ -458,6 +525,53 @@ if 'db_summary' not in st.session_state:
 # Display database summary in expandable section
 with st.expander("Database Summary", expanded=False):
     st.write(st.session_state.db_summary)
+
+# Sidebar with additional controls
+with st.sidebar:
+    st.header("🔧 Graph Controls")
+    
+    if st.button("🔄 Rebuild Graph Schema", help="Rebuild the graph database from the latest PostgreSQL schema"):
+        try:
+            with st.spinner("Rebuilding graph schema..."):
+                # Import and run the schema builder
+                from src.app.chat.graph.schema_to_graph import SchemaGraphBuilder
+                import os
+                
+                # Get OpenAI API key for semantic enrichment
+                openai_api_key = os.environ.get("OPENAI_API_KEY")
+                
+                # Build the schema graph
+                builder = SchemaGraphBuilder(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, openai_api_key)
+                try:
+                    builder.build_schema_graph()
+                    logger.info("Schema graph rebuilt successfully")
+                finally:
+                    builder.close()
+            
+            # Clear the cached summary to force regeneration
+            if 'db_summary' in st.session_state:
+                del st.session_state.db_summary
+            
+            st.success("✅ Graph schema rebuilt successfully!")
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Error rebuilding graph schema: {str(e)}")
+            logger.error(f"Error rebuilding graph schema: {str(e)}")
+    
+    # Show current graph stats
+    try:
+        with get_neo4j_driver().session() as session:
+            result = session.run("MATCH (n) RETURN count(n) as node_count")
+            node_count = result.single()["node_count"]
+            
+            result = session.run("MATCH ()-[r]->() RETURN count(r) as rel_count")
+            rel_count = result.single()["rel_count"]
+            
+            st.metric("Graph Nodes", f"{node_count:,}")
+            st.metric("Graph Relations", f"{rel_count:,}")
+    except Exception as e:
+        st.warning("Could not fetch graph statistics")
 
 # Display chat messages
 for message in st.session_state.messages:

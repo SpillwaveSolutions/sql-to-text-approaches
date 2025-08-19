@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     environment:
       - POSTGRES_DB=olist
       - POSTGRES_USER=postgres
@@ -24,7 +24,7 @@ services:
       - "7474:7474"  # HTTP
       - "7687:7687"  # Bolt
     environment:
-      - NEO4J_AUTH=neo4j/password
+      - NEO4J_AUTH=neo4j/newpassword123
       - NEO4J_PLUGINS=["graph-data-science"]
     volumes:
       - neo4j_data:/data

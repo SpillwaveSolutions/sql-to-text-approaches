@@ -25,6 +25,120 @@ import json
 from sqlalchemy import text
 import openai
 from typing import Tuple, Dict
+import re
+from src.common.sql_validator import validate_sql, get_validation_error_context
+
+def parse_json_response(raw_content: str) -> Dict:
+    """
+    Parse JSON response with robust error handling and fallback strategies.
+    
+    Args:
+        raw_content: Raw response content from LLM
+        
+    Returns:
+        Dict: Parsed JSON object
+        
+    Raises:
+        ValueError: If parsing fails completely
+    """
+    if not raw_content:
+        raise ValueError("Empty response content")
+    
+    # Strategy 1: Direct JSON parsing
+    try:
+        return json.loads(raw_content)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Direct JSON parsing failed: {e}")
+    
+    # Strategy 2: Clean and try again
+    try:
+        # Remove potential markdown code blocks
+        cleaned = re.sub(r'```json\s*', '', raw_content)
+        cleaned = re.sub(r'```\s*$', '', cleaned)
+        
+        # Remove leading/trailing whitespace
+        cleaned = cleaned.strip()
+        
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Cleaned JSON parsing failed: {e}")
+    
+    # Strategy 3: Try to fix common JSON issues
+    try:
+        # Fix unterminated strings by finding the last complete JSON object
+        fixed_content = fix_unterminated_json(raw_content)
+        return json.loads(fixed_content)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Fixed JSON parsing failed: {e}")
+    
+    # Strategy 4: Extract JSON from mixed content
+    try:
+        json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+    except json.JSONDecodeError as e:
+        logger.warning(f"Extracted JSON parsing failed: {e}")
+    
+    # Final fallback: create a structured response from any text
+    logger.error(f"All JSON parsing strategies failed. Raw content: {raw_content[:200]}...")
+    
+    # Try to extract is_valid and explanation from text
+    is_valid = False
+    explanation = raw_content[:500]  # Truncate long responses
+    
+    # Look for validation indicators in text
+    if any(word in raw_content.lower() for word in ['valid', 'correct', 'good', 'accurate']):
+        if not any(word in raw_content.lower() for word in ['not valid', 'invalid', 'incorrect', 'wrong']):
+            is_valid = True
+    
+    return {
+        "is_valid": is_valid,
+        "explanation": f"Parsed from malformed response: {explanation}",
+        "suggested_improvements": []
+    }
+
+def fix_unterminated_json(content: str) -> str:
+    """
+    Attempt to fix unterminated JSON strings and objects.
+    
+    Args:
+        content: Malformed JSON content
+        
+    Returns:
+        str: Fixed JSON content
+    """
+    try:
+        # Find the last complete opening brace
+        last_brace = content.rfind('{')
+        if last_brace == -1:
+            return content
+        
+        # Count braces to find where the JSON should end
+        brace_count = 0
+        end_pos = len(content)
+        
+        for i, char in enumerate(content[last_brace:], last_brace):
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    end_pos = i + 1
+                    break
+        
+        # If braces don't match, add closing brace
+        if brace_count > 0:
+            truncated = content[:end_pos]
+            # Close any unterminated strings
+            if truncated.count('"') % 2 == 1:
+                truncated += '"'
+            # Close the JSON object
+            truncated += '}' * brace_count
+            return truncated
+        
+        return content[:end_pos]
+    except Exception:
+        return content
 
 def get_db_summary(ddl: str) -> str:
     logger.info("Generating database summary")
@@ -41,7 +155,7 @@ def get_db_summary(ddl: str) -> str:
     
     try:
         response = openai.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             messages=messages,
             temperature=0.7,
             max_tokens=300
@@ -60,6 +174,8 @@ def generate_sql_query(question: str, ddl: str, error_context: str = None) -> Di
     system_prompt = """You are an expert SQL query generator. Given a user's question and 
     database DDL, generate a SQL query that answers the question.
 
+    IMPORTANT: Return your response as valid JSON only, without any markdown formatting or code blocks.
+    
     Return your response in the following JSON structure:
     {
         "sql": "the SQL query",
@@ -77,7 +193,7 @@ def generate_sql_query(question: str, ddl: str, error_context: str = None) -> Di
     6. When asked to return a count, return the count
     7. When asked to return a single value, return the value
     8. When a table references another table that will add meaningful additional information, perform the join and include the detail
-    9. Ensure the SQL syntax is consistent with SQL Server dialect"""
+    9. Ensure the SQL syntax is consistent with PostgreSQL dialect"""
 
     if error_context:
         system_prompt += f"\n\nPrevious attempt failed with error: {error_context}\nPlease fix the query accordingly."
@@ -89,18 +205,49 @@ def generate_sql_query(question: str, ddl: str, error_context: str = None) -> Di
     
     try:
         response = openai.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4.1",
             messages=messages,
             temperature=0.1,
             max_tokens=500,
             response_format={ "type": "json_object" }
         )
-        query_response = json.loads(response.choices[0].message.content)
+        
+        # Get the raw response content
+        raw_content = response.choices[0].message.content
+        logger.debug(f"Raw SQL generation response: {raw_content}")
+        
+        # Try to parse JSON with robust error handling
+        query_response = parse_json_response(raw_content)
+        
+        # Validate required fields
+        if not isinstance(query_response, dict):
+            raise ValueError("Response is not a valid JSON object")
+        
+        # Ensure required fields exist with fallbacks
+        if "sql" not in query_response:
+            logger.warning("Missing 'sql' field in query response")
+            query_response["sql"] = "SELECT 1 as error -- SQL parsing failed"
+        
+        if "explanation" not in query_response:
+            query_response["explanation"] = "Query generated with parsing issues"
+        
+        if "tables_used" not in query_response:
+            query_response["tables_used"] = []
+        
+        if "expected_result_type" not in query_response:
+            query_response["expected_result_type"] = "unknown"
+        
         logger.info(f"Generated SQL query: {query_response['sql']}")
         return query_response
     except Exception as e:
         logger.error(f"Error generating SQL query: {str(e)}")
-        raise
+        # Return a safe fallback instead of raising
+        return {
+            "sql": "SELECT 'Error: SQL generation failed' as error_message",
+            "explanation": f"SQL generation failed: {str(e)}",
+            "tables_used": [],
+            "expected_result_type": "error"
+        }
 
 def attempt_query_generation_and_validation(question: str, ddl: str, validation_retries: int = 2) -> Tuple[Dict, bool, str]:
     """Attempt to generate and validate a query with retries."""
@@ -131,40 +278,28 @@ def attempt_query_generation_and_validation(question: str, ddl: str, validation_
     return query_response, False, "Maximum validation attempts reached"
 
 def validate_query(question: str, query_response: Dict, ddl: str) -> Tuple[bool, str]:
-    logger.info("Validating generated query")
-    system_prompt = """You are a SQL query validator. Given a user question, generated SQL query with metadata, and database DDL:
-    1. Check if the query will answer the user's question correctly
-    2. Verify table relationships and joins are correct
-    3. Ensure all necessary conditions are included
-    4. Verify the expected result type matches the question intent
-    5. Ensure the query reasonably limits the results for lists to less than 20
-    
-    Return your response in the following JSON structure:
-    {
-        "is_valid": true/false,
-        "explanation": "detailed explanation of validation result",
-        "suggested_improvements": ["list", "of", "improvements"] # only if not valid
-    }"""
-    
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Question: {question}\nQuery Response: {json.dumps(query_response)}\nDDL: {ddl}"}
-    ]
+    logger.info("Validating generated query using SQL validator")
     
     try:
-        response = openai.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            temperature=0.1,
-            max_tokens=300,
-            response_format={ "type": "json_object" }
-        )
-        validation_result = json.loads(response.choices[0].message.content)
-        logger.info(f"Query validation result: valid={validation_result['is_valid']}, message={validation_result['explanation']}")
-        return validation_result["is_valid"], validation_result["explanation"]
+        sql_query = query_response.get("sql", "")
+        if not sql_query:
+            return False, "No SQL query provided in response"
+        
+        # Use the SQL validator for syntax and schema validation
+        validation_result = validate_sql(sql_query, skip_syntax=False)
+        
+        if validation_result["is_valid"]:
+            logger.info("Query validation successful using SQL validator")
+            return True, validation_result.get("message", "SQL query validation passed")
+        else:
+            error_context = get_validation_error_context(validation_result)
+            logger.warning(f"Query validation failed: {error_context}")
+            return False, error_context
+            
     except Exception as e:
-        logger.error(f"Error during query validation: {str(e)}")
-        raise
+        error_msg = f"Error during query validation: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
 
 def attempt_query_execution(query: str, max_retries: int = 2) -> Tuple[pd.DataFrame, bool, str]:
     """Attempt to execute a query with retries."""
@@ -244,7 +379,7 @@ Sample Data:
     
     try:
         response = openai.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4.1",
             messages=messages,
             temperature=0.7,
             max_tokens=150

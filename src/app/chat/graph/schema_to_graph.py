@@ -6,15 +6,18 @@ It creates a graph representation of tables, columns, and their relationships.
 import os
 from neo4j import GraphDatabase
 import logging
-from metadata.get_database_ddl import get_database_schema
-from app.chat.graph.semantic_enrichment import SemanticEnricher
+from src.metadata.get_database_ddl import get_database_schema
+from src.app.chat.graph.semantic_enrichment import SemanticEnricher
+from src.loadin.create_foreign_keys import find_foreign_key_relationships, create_foreign_keys
+from src.common.db_utils import get_db_connection
+from sqlalchemy import text
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SchemaGraphBuilder:
-    def __init__(self, uri: str = "bolt://localhost:7687", user: str = "neo4j", password: str = "password", openai_api_key: str = None):
+    def __init__(self, uri: str = "bolt://localhost:7687", user: str = "neo4j", password: str = "newpassword123", openai_api_key: str = None):
         """Initialize the Neo4j database connection"""
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
         self.semantic_enricher = SemanticEnricher(openai_api_key) if openai_api_key else None
@@ -22,6 +25,38 @@ class SchemaGraphBuilder:
     def close(self):
         """Close the Neo4j driver connection"""
         self.driver.close()
+    
+    def create_postgresql_foreign_keys(self):
+        """Create foreign key relationships in the PostgreSQL database"""
+        try:
+            # Get PostgreSQL database connection
+            pg_engine = get_db_connection()
+            
+            # Get all tables in the database
+            with pg_engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_type = 'BASE TABLE'
+                    AND table_schema = 'public'
+                """))
+                tables = [row[0] for row in result]
+            
+            logger.info(f"Found {len(tables)} tables in PostgreSQL database")
+            
+            # Find and create foreign key relationships
+            relationships = find_foreign_key_relationships(pg_engine, tables)
+            if relationships:
+                logger.info(f"Found {len(relationships)} potential foreign key relationships")
+                create_foreign_keys(pg_engine, relationships)
+                logger.info("Foreign key creation completed successfully")
+            else:
+                logger.info("No new foreign key relationships found")
+                
+        except Exception as e:
+            logger.warning(f"Failed to create PostgreSQL foreign keys: {e}")
+            # Don't fail the entire graph building process if FK creation fails
+            logger.info("Continuing with graph building without new foreign keys")
         
     def clear_graph(self):
         """Clear existing graph data"""
@@ -30,19 +65,24 @@ class SchemaGraphBuilder:
 
     def build_schema_graph(self):
         """Build the complete schema graph from database metadata"""
-        # Get the schema
+        
+        # Step 1: Ensure foreign keys exist in PostgreSQL database
+        logger.info("Step 1: Creating foreign key relationships in PostgreSQL...")
+        self.create_postgresql_foreign_keys()
+        
+        # Step 2: Get the schema (now with foreign keys)
         schema = get_database_schema()
         logger.info(f"Retrieved schema with {len(schema['tables'])} tables")
         
-        # Clear existing graph
+        # Step 3: Clear existing graph
         self.clear_graph()
         logger.info("Cleared existing graph")
         
         # Dictionary to keep track of created nodes
         node_mapping = {}
         
-        # First pass: Create all tables and their columns
-        logger.info("First pass: Creating tables and columns...")
+        # Step 4: Create all tables and their columns
+        logger.info("Step 4: Creating tables and columns...")
         for table in schema['tables']:
             # Add table node
             table_node_id = f"{table['schema']}.{table['name']}"
@@ -71,8 +111,8 @@ class SchemaGraphBuilder:
                     )
                     logger.info(f"Added PK relationship for column: {col_node_id}")
 
-        # Second pass: Create all foreign key relationships
-        logger.info("\nSecond pass: Creating foreign key relationships...")
+        # Step 5: Create all foreign key relationships
+        logger.info("\nStep 5: Creating foreign key relationships...")
         for table in schema['tables']:
             for fk in table['foreign_keys']:
                 for i, col_name in enumerate(fk['columns']):
@@ -90,9 +130,9 @@ class SchemaGraphBuilder:
                         logger.error(f"Could not find column for FK relationship: {e}")
                         logger.error(f"Available columns: {sorted(node_mapping.keys())}")
         
-        # Third pass: Add semantic enrichment if enabled
+        # Step 6: Add semantic enrichment if enabled
         if self.semantic_enricher:
-            logger.info("\nThird pass: Adding semantic enrichment...")
+            logger.info("\nStep 6: Adding semantic enrichment...")
             self.semantic_enricher.enrich_graph(self.driver, schema)
 
     def add_table_node(self, table_name: str, schema: str) -> str:
@@ -184,7 +224,7 @@ class SchemaGraphBuilder:
             else:
                 logger.error(f"Could not find one or both nodes for FK relationship: {from_column_id} -> {to_column_id}")
 
-def build_schema_graph(uri: str = "bolt://localhost:7687", user: str = "neo4j", password: str = "password", openai_api_key: str = None):
+def build_schema_graph(uri: str = "bolt://localhost:7687", user: str = "neo4j", password: str = "newpassword123", openai_api_key: str = None):
     """Convenience function to build the schema graph"""
     builder = SchemaGraphBuilder(uri, user, password, openai_api_key)
     try:
@@ -192,7 +232,7 @@ def build_schema_graph(uri: str = "bolt://localhost:7687", user: str = "neo4j", 
     finally:
         builder.close()
 
-def run_sample_queries(uri: str = "bolt://localhost:7687", user: str = "neo4j", password: str = "password"):
+def run_sample_queries(uri: str = "bolt://localhost:7687", user: str = "neo4j", password: str = "newpassword123"):
     """Run sample queries to validate graph ingestion"""
     driver = GraphDatabase.driver(uri, auth=(user, password))
     try:
@@ -254,7 +294,7 @@ def run_sample_queries(uri: str = "bolt://localhost:7687", user: str = "neo4j", 
 if __name__ == "__main__":
     uri = "bolt://localhost:7687"
     user = "neo4j"
-    password = "password"
+    password = "newpassword123"
     openai_api_key = os.environ.get("OPENAI_API_KEY") if os.getenv("OPENAI_API_KEY") else None
     
     print("Building schema graph...")
