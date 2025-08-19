@@ -32,9 +32,18 @@ Data Granularity: Transaction-level detail
 
 ### Prerequisites
 
+**Required:**
 - Python 3.12+ (Poetry will detect and use automatically)
 - Docker and Docker Compose
 - Poetry (install from https://python-poetry.org/)
+
+**macOS System Dependencies (install via Homebrew):**
+```bash
+# Required for machine learning libraries (torch, sentence-transformers)
+brew install cmake
+brew install portaudio  # Required for streamlit-mic-recorder audio functionality
+```
+
 
 ### 1. Environment Setup
 
@@ -43,9 +52,15 @@ Data Granularity: Transaction-level detail
 git clone <repository-url>
 cd text-to-sql-approaches
 
+# Install system dependencies (see Prerequisites section above)
+# macOS: brew install cmake portaudio
+# Linux: sudo apt install cmake build-essential portaudio19-dev python3-dev
+
 # Poetry will automatically use Python 3.12+ if available
 # Install dependencies (choose based on which apps you want to run)
 poetry install --with chat,rag,dev  # For all features
+
+# Note: First installation may take 5-10 minutes due to ML dependencies (torch, sentence-transformers)
 ```
 
 ### 2. Start Infrastructure Services
@@ -128,7 +143,7 @@ poetry run streamlit run src/app/chat/rag/rag_chat_app.py
 The project uses Poetry with organized dependency groups:
 
 ```bash
-# Core dependencies only (for data pipeline)
+# Core dependencies (includes torch, sentence-transformers for ML functionality)
 poetry install
 
 # Add chat interface support
@@ -143,6 +158,8 @@ poetry install --with chat,rag
 # Development setup (includes testing, formatting, etc.)
 poetry install --with chat,rag,graph,dev
 ```
+
+**Note:** Core ML dependencies (torch, sentence-transformers) are included in the base installation since they're used across multiple applications. This ensures consistent AI functionality regardless of which specific features you enable.
 
 ### Database Configuration
 
@@ -192,6 +209,13 @@ poetry run enrich-metadata      # Enhance schema with AI-generated descriptions
 - Scales to large databases without context window limitations  
 - Provides only relevant schema information to the LLM
 - Most efficient token usage and query generation
+
+### Next Steps
+There's a tremendous number of improvements that could be made from here.
+- To better handle column, selection, and table gathering. 
+- Things like BM 25, re-ranking, connection weighting...etc.
+- Using custom model embeddings that have been trained either on SQL, the business domain, or both
+
 
 ## Example Usage
 
@@ -283,6 +307,33 @@ docker compose exec postgres psql -U postgres -d olist -c "CREATE EXTENSION IF N
 # Poetry handles all module paths automatically via pyproject.toml
 # Always use `poetry run` for all commands to ensure proper environment
 poetry run python your_script.py
+```
+
+**5. Machine Learning Dependencies (torch, sentence-transformers)**
+```bash
+# If you get build errors during poetry install
+# macOS:
+brew install cmake portaudio
+
+# Linux (Ubuntu/Debian):
+sudo apt install cmake build-essential portaudio19-dev python3-dev
+
+# Clear poetry cache and reinstall
+poetry cache clear pypi --all
+poetry install --with chat,rag
+```
+
+**6. Speech-to-text functionality issues**
+```bash
+# Ensure PortAudio is installed for microphone support
+# macOS:
+brew install portaudio
+
+# Linux:
+sudo apt install portaudio19-dev
+
+# Then reinstall the mic recorder package
+poetry add --force-reinstall streamlit-mic-recorder
 ```
 
 ### Performance Tips

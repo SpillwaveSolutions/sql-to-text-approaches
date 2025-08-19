@@ -43,12 +43,15 @@ tqdm = "^4.66.1"
 openai = "^1.3.0"
 sqlvalidator = "^0.0.20"
 streamlit-mic-recorder = "^0.0.8"
+# ML/AI core dependencies (used by multiple apps)
+torch = "^2.0.0"
+sentence-transformers = "^2.2.2"
 
 [tool.poetry.extras]
 plain-llm = ["streamlit", "plotly"]
 graph = ["neo4j", "cogdb", "streamlit", "plotly"]
-rag = ["pgvector", "sentence-transformers", "scikit-learn", "streamlit", "plotly"]
-all = ["streamlit", "plotly", "neo4j", "cogdb", "pgvector", "sentence-transformers", "scikit-learn"]
+rag = ["pgvector", "scikit-learn", "streamlit", "plotly"]
+all = ["streamlit", "plotly", "neo4j", "cogdb", "pgvector", "scikit-learn"]
 
 [tool.poetry.group.chat.dependencies]
 # Chat application dependencies
@@ -63,7 +66,6 @@ cogdb = "^3.0.7"
 [tool.poetry.group.rag.dependencies]
 # RAG-specific dependencies for pgvector
 pgvector = "^0.2.4"
-sentence-transformers = "^2.2.2"
 scikit-learn = "^1.3.0"
 
 [tool.poetry.group.dev.dependencies]
