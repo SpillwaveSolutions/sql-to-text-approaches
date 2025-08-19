@@ -26,6 +26,7 @@ from sqlalchemy import text
 import openai
 from sentence_transformers import SentenceTransformer
 from src.common.sql_validator import validate_sql, get_validation_error_context
+from src.common.speech_to_text import create_speech_to_text_widget
 
 def check_and_initialize_rag_system():
     """Check if the RAG system is initialized and set it up if needed"""
@@ -641,8 +642,70 @@ def main():
             else:
                 st.write(message["content"])
     
-    # Chat input
-    if prompt := st.chat_input("Ask a question about your data..."):
+    # Voice and text input section
+    st.divider()
+    col1, col2 = st.columns([5, 1])
+    
+    with col1:
+        # Initialize session state for voice transcript
+        if 'voice_transcript' not in st.session_state:
+            st.session_state.voice_transcript = ""
+        
+        # Text input with voice transcript if available
+        input_value = st.session_state.voice_transcript
+        prompt = st.text_input(
+            "Ask a question about your data...",
+            value=input_value,
+            key="user_input",
+            placeholder="Type your question or use the microphone"
+        )
+    
+    with col2:
+        st.write(" ")  # Add some spacing to align with text input
+        
+        # Add a help tooltip for voice input
+        st.markdown("🎤 **Voice Input**")
+        with st.expander("ℹ️ Voice Help", expanded=False):
+            st.write("""
+            **How to use voice input:**
+            1. Click the 🎤 microphone button
+            2. Allow microphone access if prompted
+            3. Speak your question clearly (3+ seconds)
+            4. Click ⏹️ to stop recording
+            5. Your text will appear in the input box
+            
+            **Example questions:**
+            - "Show me the top 10 customers by sales"
+            - "What are the most popular products?"
+            - "How many orders were placed last month?"
+            """)
+        
+        # Speech-to-text recorder
+        try:
+            transcript = create_speech_to_text_widget(
+                key="rag_voice_input",
+                start_prompt="🎤",
+                stop_prompt="⏹️",
+                language="auto"
+            )
+            
+            # Update session state if we get a new transcript
+            if transcript and transcript != st.session_state.voice_transcript:
+                st.session_state.voice_transcript = transcript
+                st.rerun()  # Refresh to update the text input
+                
+        except Exception as e:
+            logger.error(f"Voice input error: {e}")
+            st.error("🎤 Voice input unavailable")
+    
+    # Submit button
+    submit_clicked = st.button("Send", key="send_button", type="primary")
+    
+    # Process input if we have a prompt (from typing or voice) and submit was clicked
+    if submit_clicked and prompt and prompt.strip():
+        # Clear the voice transcript after using it
+        st.session_state.voice_transcript = ""
+        
         # Display user message
         st.chat_message("user").write(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
