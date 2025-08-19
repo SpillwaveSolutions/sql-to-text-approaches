@@ -87,7 +87,7 @@ Existing Description: {existing_description if existing_description else 'None'}
 Please provide a comprehensive description that covers:
 1. The business purpose and meaning of this column
 2. Its relationship to the overall table entity
-3. How it connects to other tables (if applicable)
+3. How it connects to other tables or columns in other tables (if applicable)
 4. Any business rules or constraints implied by its data type and nullability
 5. Typical use cases for this column in business analysis
 

@@ -23,10 +23,6 @@ python -m venv venv
 ```bash
 source venv/bin/activate
 ```
-- On Windows:
-```bash
-.\venv\Scripts\activate
-```
 
 3. Install required packages:
 ```bash
@@ -80,7 +76,7 @@ Ok we should be ready to run the SQL Chatbot.
 pip install -r src/app/chat/plain_llm/requirements.txt
 export OPENAI_API_KEY='your-api-key-here'
 export PYTHONPATH=./src
-python -m streamlit run src/app/chat/plain_llm/app.py
+python -m streamlit run src/app/chat/plain_llm/prompt_chain_app.py
 ```
 
 
