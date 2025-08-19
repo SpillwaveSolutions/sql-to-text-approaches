@@ -6,7 +6,7 @@ import pandas as pd
 from sqlalchemy import text
 from time import sleep
 from tqdm import tqdm
-from common.db_utils import get_db_connection
+from src.common.db_utils import get_db_connection
 
 def extract_sqlite_file():
     """Extract the SQLite database from zip file"""
@@ -104,14 +104,27 @@ def transfer_data(sqlite_path):
             df = pd.read_sql_query(f"SELECT * FROM {table}", sqlite_conn)
             tqdm.write(f"Read {len(df)} rows from {table}")
             
-            # Write to PostgreSQL
-            df.to_sql(
-                name=table,
-                con=engine,
-                if_exists='replace',
-                index=False,
-                chunksize=1000
-            )
+            # Write to PostgreSQL - use 'append' if table exists to avoid FK constraint issues
+            # First check if table exists and has data
+            with engine.connect() as conn:
+                result = conn.execute(text(f"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '{table}')"))
+                table_exists = result.fetchone()[0]
+                
+                if table_exists:
+                    # Check if table has data
+                    result = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
+                    row_count = result.fetchone()[0]
+                    
+                    if row_count > 0:
+                        tqdm.write(f"Table {table} already has {row_count} rows, skipping...")
+                        continue
+                    else:
+                        # Table exists but empty, truncate and append
+                        conn.execute(text(f"TRUNCATE TABLE {table}"))
+                        df.to_sql(name=table, con=engine, if_exists='append', index=False, chunksize=1000)
+                else:
+                    # Table doesn't exist, create it
+                    df.to_sql(name=table, con=engine, if_exists='replace', index=False, chunksize=1000)
             tqdm.write(f"Completed transfer of table: {table}")
         except Exception as e:
             tqdm.write(f"Error transferring table {table}: {e}")

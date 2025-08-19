@@ -4,13 +4,8 @@ import os
 import logging
 import json
 from datetime import datetime
-from common.visualization_selector import VisualizationSelector, render_visualization
 from neo4j import GraphDatabase
 from decimal import Decimal
-
-# Get the src directory path
-src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
-sys.path.append(src_path)
 
 # Configure logging
 logging.basicConfig(
@@ -23,9 +18,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger('database_chat')
 
-# Import using absolute paths
-from common.db_utils import get_db_connection
-from metadata.get_database_ddl import get_database_ddl
+from src.common.db_utils import get_db_connection
+from src.metadata.get_database_ddl import get_database_ddl
+from src.common.visualization_selector import VisualizationSelector, render_visualization
 import streamlit as st
 import pandas as pd
 import json

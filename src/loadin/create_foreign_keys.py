@@ -2,7 +2,7 @@ import sqlite3
 from sqlalchemy import text
 import urllib.parse
 from tqdm import tqdm
-from common.db_utils import get_db_connection
+from src.common.db_utils import get_db_connection
 
 def get_table_columns_with_types(engine, table_name):
     """Get all columns and their data types for a given table"""

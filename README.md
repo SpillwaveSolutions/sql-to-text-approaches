@@ -21,24 +21,29 @@ The system provides both textual insights and automatic visualizations through u
 - **Data Pipeline**: SQLite → PostgreSQL with automated schema enrichment
 - **Dependency Management**: Poetry for modern Python package management
 
+## Dataset Specifications (Mandatory Separate Dependency)
+Source Data: Point-of-sale transaction data from Kaggle: https://www.kaggle.com/code/youssefismail20/sql-e-commerce/input
+Time Period: 9/4/2016 to 10/17/2018
+Data Granularity: Transaction-level detail
+
+> You will need to download this file and put it in a /data folder at the root of the project
+
 ## Quick Start
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.12+ (Poetry will detect and use automatically)
 - Docker and Docker Compose
 - Poetry (install from https://python-poetry.org/)
 
 ### 1. Environment Setup
 
 ```bash
-# Ensure Python 3.12 is active
-export PATH="$(brew --prefix)/opt/python@3.12/libexec/bin:$PATH"
-
 # Clone and navigate to project
 git clone <repository-url>
 cd text-to-sql-approaches
 
+# Poetry will automatically use Python 3.12+ if available
 # Install dependencies (choose based on which apps you want to run)
 poetry install --with chat,rag,dev  # For all features
 ```
@@ -56,11 +61,10 @@ docker compose ps
 ### 3. Data Pipeline Setup
 
 ```bash
-# Set environment variables
-export PYTHONPATH=./src
+# Set OpenAI API key
 export OPENAI_API_KEY=your-openai-api-key
 
-# Run the complete data pipeline
+# Run the complete data pipelin
 ./src/loadin/run_data_importer.sh
 
 # Generate enhanced metadata (optional but recommended)
@@ -78,7 +82,6 @@ Best for: Small to medium schemas, quick setup, understanding the baseline appro
 ```bash
 poetry install --with chat
 export OPENAI_API_KEY=your-openai-api-key
-export PYTHONPATH=./src
 poetry run streamlit run src/app/chat/plain_llm/prompt_chain_app.py
 ```
 
@@ -92,7 +95,6 @@ Best for: Complex relational queries, understanding data relationships
 ```bash
 poetry install --with chat,graph
 export OPENAI_API_KEY=your-openai-api-key
-export PYTHONPATH=./src
 poetry run streamlit run src/app/chat/graph/graph_chat_app.py
 ```
 
@@ -108,13 +110,11 @@ Best for: Large schemas, production use, semantic relevance
 poetry install --with chat,rag
 
 # One-time setup: Initialize pgvector and index schema
-export PYTHONPATH=./src
 poetry run python src/app/chat/rag/setup_vector_db.py
 poetry run python src/app/chat/rag/index_schema.py
 
 # Run the application
 export OPENAI_API_KEY=your-openai-api-key
-export PYTHONPATH=./src
 poetry run streamlit run src/app/chat/rag/rag_chat_app.py
 ```
 
@@ -280,8 +280,9 @@ docker compose exec postgres psql -U postgres -d olist -c "CREATE EXTENSION IF N
 
 **4. Python import errors**
 ```bash
-# Always set PYTHONPATH when running scripts
-export PYTHONPATH=./src
+# Poetry handles all module paths automatically via pyproject.toml
+# Always use `poetry run` for all commands to ensure proper environment
+poetry run python your_script.py
 ```
 
 ### Performance Tips

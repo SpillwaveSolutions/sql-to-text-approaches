@@ -1,6 +1,7 @@
 import time
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
+from urllib.parse import quote_plus
 
 def wait_for_postgres(engine, max_attempts=5, delay=2):
     """Wait for PostgreSQL to be ready"""
@@ -34,8 +35,11 @@ def get_db_connection(database='olist', host='localhost', port=5432, autocommit=
     username = 'postgres'
     password = 'YourStrong@Passw0rd'
     
+    # URL encode the password to handle special characters like @
+    encoded_password = quote_plus(password)
+    
     engine = create_engine(
-        f'postgresql://{username}:{password}@{host}:{port}/{database}',
+        f'postgresql://{username}:{encoded_password}@{host}:{port}/{database}',
         isolation_level='AUTOCOMMIT' if autocommit else None,
         pool_pre_ping=True  # Add connection health check
     )

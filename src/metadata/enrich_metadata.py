@@ -1,8 +1,8 @@
 import os
 import re
 from sqlalchemy import text
-from common.db_utils import get_db_connection
-from metadata.get_database_ddl import get_database_ddl
+from src.common.db_utils import get_db_connection
+from src.metadata.get_database_ddl import get_database_ddl
 from openai import OpenAI
 from typing import Dict, List, Tuple
 
@@ -17,12 +17,12 @@ def get_table_columns(engine, table_name: str, schema_name: str = 'public') -> L
     FROM information_schema.columns cols
     LEFT JOIN pg_class pgc ON pgc.relname = cols.table_name
     LEFT JOIN pg_namespace pgn ON pgn.oid = pgc.relnamespace AND pgn.nspname = cols.table_schema
-    WHERE cols.table_name = %s 
-        AND cols.table_schema = %s
+    WHERE cols.table_name = :table_name 
+        AND cols.table_schema = :schema_name
     ORDER BY cols.ordinal_position
     """
     with engine.connect() as conn:
-        result = conn.execute(text(query), (table_name, schema_name)).fetchall()
+        result = conn.execute(text(query), {"table_name": table_name, "schema_name": schema_name}).fetchall()
         return [(row[0], row[1], row[2], row[3]) for row in result]
 
 def get_foreign_key_info(engine, table_name: str, schema_name: str = 'public') -> List[Dict]:
@@ -42,11 +42,11 @@ def get_foreign_key_info(engine, table_name: str, schema_name: str = 'public') -
         ON ccu.constraint_name = tc.constraint_name
         AND ccu.table_schema = tc.table_schema
     WHERE tc.constraint_type = 'FOREIGN KEY'
-        AND (tc.table_name = %s OR ccu.table_name = %s)
-        AND tc.table_schema = %s
+        AND (tc.table_name = :table_name1 OR ccu.table_name = :table_name2)
+        AND tc.table_schema = :schema_name
     """
     with engine.connect() as conn:
-        result = conn.execute(text(query), (table_name, table_name, schema_name)).fetchall()
+        result = conn.execute(text(query), {"table_name1": table_name, "table_name2": table_name, "schema_name": schema_name}).fetchall()
         return [
             {
                 "fk_name": row[0],
@@ -117,10 +117,10 @@ def update_column_description(engine, table_name: str, column_name: str, descrip
     """Update or add column comment"""
     # Escape single quotes in description
     escaped_description = description.replace("'", "''")
-    query = f'COMMENT ON COLUMN "{schema_name}"."{table_name}"."{column_name}" IS %s'
+    query = f'COMMENT ON COLUMN "{schema_name}"."{table_name}"."{column_name}" IS :description'
     
     with engine.connect() as conn:
-        conn.execute(text(query), (escaped_description,))
+        conn.execute(text(query), {"description": escaped_description})
         conn.commit()
 
 def enrich_metadata(schema_name: str = 'public'):
@@ -136,12 +136,12 @@ def enrich_metadata(schema_name: str = 'public'):
     SELECT table_name
     FROM information_schema.tables
     WHERE table_type = 'BASE TABLE'
-        AND table_schema = %s
+        AND table_schema = :schema_name
     ORDER BY table_name
     """
     
     with engine.connect() as conn:
-        tables = [row[0] for row in conn.execute(text(table_query), (schema_name,)).fetchall()]
+        tables = [row[0] for row in conn.execute(text(table_query), {"schema_name": schema_name}).fetchall()]
     
     # Process each table
     for table_name in tables:
